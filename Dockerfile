@@ -12,7 +12,6 @@ LABEL org.opencontainers.image.version="1.0.0"
 LABEL org.opencontainers.image.created="2024-01-01T00:00:00Z"
 LABEL org.opencontainers.image.authors="System Administrator"
 LABEL org.opencontainers.image.licenses="MIT"
-LABEL org.opencontainers.image.documentation="https://github.com/your-org/rdio-scanner-monitor"
 
 # Set environment variables for Python optimization and container behavior
 ENV PYTHONUNBUFFERED=1 \
@@ -32,23 +31,16 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         # Audio processing dependencies
         ffmpeg \
-        libavcodec-dev \
-        libavformat-dev \
-        libavutil-dev \
         # Network and SSL dependencies
         ca-certificates \
         curl \
         # PostgreSQL client libraries
         libpq-dev \
-        # Build dependencies for Python packages
+        # Build dependencies for Python packages (temporarily)
         gcc \
         g++ \
-        # Process management utilities
-        supervisor \
         # System monitoring tools
-        htop \
         procps \
-        # Cleanup utilities
         && apt-get clean \
         && rm -rf /var/lib/apt/lists/* \
         && rm -rf /tmp/* \
@@ -63,7 +55,6 @@ RUN mkdir -p \
     /app/logs \
     /app/temp \
     /app/config \
-    /app/scripts \
     && chown -R appuser:appuser /app
 
 # Copy Python requirements file first (for Docker layer caching optimization)
@@ -84,14 +75,8 @@ COPY --chown=appuser:appuser rdio_scanner.py /app/rdio_scanner.py
 COPY --chown=appuser:appuser health_check.py /app/health_check.py
 COPY --chown=appuser:appuser entrypoint.sh /app/entrypoint.sh
 
-# Copy supervisor configuration for process management
-COPY --chown=appuser:appuser supervisord.conf /app/supervisord.conf
-
 # Make scripts executable
 RUN chmod +x /app/entrypoint.sh /app/health_check.py
-
-# Create configuration template
-COPY --chown=appuser:appuser config.ini.template /app/config/config.ini.template
 
 # Set up proper permissions for application directories
 RUN chown -R appuser:appuser /app && \
