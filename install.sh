@@ -140,7 +140,7 @@ install_packages() {
     
     # Enable EPEL and PowerTools repositories
     dnf install -y epel-release
-    dnf config-manager --set-enabled powertools
+    dnf config-manager --set-enabled crb
     
     # Install Podman and container tools
     dnf install -y podman podman-compose podman-docker
