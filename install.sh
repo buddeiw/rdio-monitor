@@ -138,17 +138,43 @@ install_packages() {
     # Update system packages
     dnf update -y
     
-    # Enable EPEL and PowerTools repositories
+    # Enable EPEL and CodeReady Builder repositories
     dnf install -y epel-release
     dnf config-manager --set-enabled crb
-
-    # Install ffmpeg
+    
+    # Enable RPM Fusion for multimedia packages
     dnf install -y --nogpgcheck \
         https://download1.rpmfusion.org/free/el/rpmfusion-free-release-$(rpm -E %rhel).noarch.rpm \
         https://download1.rpmfusion.org/nonfree/el/rpmfusion-nonfree-release-$(rpm -E %rhel).noarch.rpm
     
     # Install Podman and container tools
     dnf install -y podman podman-compose podman-docker
+    
+    # Verify podman installation and fix common issues
+    if ! command -v podman &> /dev/null; then
+        log_message "ERROR" "Podman installation failed"
+        exit 1
+    fi
+    
+    # Create symlink if podman-compose can't find podman
+    if [[ ! -L /usr/bin/docker ]] && [[ ! -f /usr/bin/docker ]]; then
+        ln -sf /usr/bin/podman /usr/bin/docker
+    fi
+    
+    # Fix podman-compose PATH issues
+    if command -v podman-compose &> /dev/null; then
+        # Create wrapper script to ensure proper PATH
+        cat > /usr/local/bin/podman-compose-wrapper << 'EOF'
+#!/bin/bash
+export PATH="/usr/bin:$PATH"
+exec podman-compose "$@"
+EOF
+        chmod +x /usr/local/bin/podman-compose-wrapper
+    else
+        # Install podman-compose via pip if not available
+        log_message "WARN" "podman-compose not available in repos, installing via pip"
+        pip3 install podman-compose
+    fi
     
     # Install system utilities
     dnf install -y \
@@ -173,6 +199,10 @@ install_packages() {
         gcc-c++ \
         make
     
+    # Install audio processing libraries
+    dnf install -y \
+        ffmpeg \
+        ffmpeg-devel
     
     # Install PostgreSQL client
     dnf install -y postgresql postgresql-contrib
@@ -294,22 +324,98 @@ set -e
 
 echo "Starting Rdio Scanner Monitor..."
 cd /etc/rdio-monitor
-podman-compose up -d
+
+# Use full path and ensure podman is in PATH
+export PATH="/usr/bin:$PATH"
+
+# Try podman-compose, fall back to alternatives
+if command -v podman-compose &> /dev/null; then
+    podman-compose up -d
+elif command -v /usr/local/bin/podman-compose-wrapper &> /dev/null; then
+    /usr/local/bin/podman-compose-wrapper up -d
+else
+    # Manual container startup if podman-compose fails
+    echo "Starting containers manually..."
+    
+    # Create network
+    podman network create rdio_network --subnet 172.20.0.0/24 || true
+    
+    # Start PostgreSQL
+    podman run -d \
+        --name rdio-postgresql \
+        --network rdio_network \
+        --ip 172.20.0.10 \
+        -p 5432:5432 \
+        -v /var/lib/rdio-monitor/postgresql:/var/lib/postgresql/data \
+        -v /var/lib/rdio-monitor/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro \
+        -e POSTGRES_PASSWORD=postgres_admin_password \
+        -e POSTGRES_DB=rdio_scanner \
+        -e POSTGRES_USER=postgres \
+        --restart unless-stopped \
+        postgres:15-alpine
+    
+    # Wait for PostgreSQL
+    echo "Waiting for PostgreSQL to start..."
+    sleep 30
+    
+    # Start Redis
+    podman run -d \
+        --name rdio-redis \
+        --network rdio_network \
+        --ip 172.20.0.30 \
+        -p 6379:6379 \
+        -v /var/lib/rdio-monitor/redis:/data \
+        --restart unless-stopped \
+        redis:7-alpine
+    
+    # Start Grafana
+    podman run -d \
+        --name rdio-grafana \
+        --network rdio_network \
+        --ip 172.20.0.20 \
+        -p 3000:3000 \
+        -v /var/lib/rdio-monitor/grafana:/var/lib/grafana \
+        -v /etc/rdio-monitor/grafana.ini:/etc/grafana/grafana.ini:ro \
+        -e GF_SECURITY_ADMIN_USER=admin \
+        -e GF_SECURITY_ADMIN_PASSWORD=admin \
+        --restart unless-stopped \
+        grafana/grafana:latest
+    
+    # Build and start scanner app
+    cd /opt/rdio-monitor
+    podman build -t rdio-scanner:latest .
+    
+    podman run -d \
+        --name rdio-scanner-app \
+        --network rdio_network \
+        --ip 172.20.0.50 \
+        -p 8080:8080 \
+        -v /etc/rdio-monitor/config.ini:/app/config/config.ini:ro \
+        -v /var/lib/rdio-monitor/audio:/app/audio \
+        -v /var/log/rdio-monitor:/app/logs \
+        -e CONFIG_FILE=/app/config/config.ini \
+        -e DATABASE_HOST=172.20.0.10 \
+        -e REDIS_HOST=172.20.0.30 \
+        --restart unless-stopped \
+        rdio-scanner:latest
+    
+    echo "Containers started manually"
+fi
 
 echo "Waiting for services to start..."
 sleep 30
 
 # Initialize database if needed
 if [[ -f /var/lib/rdio-monitor/schema.sql ]]; then
-    podman exec rdio-postgresql pg_isready -U postgres || {
+    if podman exec rdio-postgresql pg_isready -U postgres; then
+        # Check if database needs initialization
+        if ! podman exec rdio-postgresql psql -U postgres -d rdio_scanner -c "SELECT 1 FROM calls LIMIT 1;" 2>/dev/null; then
+            echo "Initializing database schema..."
+            podman exec -i rdio-postgresql psql -U postgres -d rdio_scanner < /var/lib/rdio-monitor/schema.sql
+        fi
+    else
         echo "Database not ready"
         exit 1
-    }
-    
-    # Check if database needs initialization
-    if ! podman exec rdio-postgresql psql -U postgres -d rdio_scanner -c "SELECT 1 FROM calls LIMIT 1;" 2>/dev/null; then
-        echo "Initializing database schema..."
-        podman exec -i rdio-postgresql psql -U postgres -d rdio_scanner < /var/lib/rdio-monitor/schema.sql
     fi
 fi
 
@@ -331,7 +437,19 @@ echo "Stopping Rdio Scanner Monitor..."
 systemctl stop rdio-monitor.service || echo "Service already stopped"
 
 cd /etc/rdio-monitor
-podman-compose down
+
+# Try podman-compose first, fall back to manual
+if command -v podman-compose &> /dev/null; then
+    podman-compose down
+elif command -v /usr/local/bin/podman-compose-wrapper &> /dev/null; then
+    /usr/local/bin/podman-compose-wrapper down
+else
+    # Manual container stop
+    echo "Stopping containers manually..."
+    podman stop rdio-scanner-app rdio-grafana rdio-redis rdio-postgresql || true
+    podman rm rdio-scanner-app rdio-grafana rdio-redis rdio-postgresql || true
+    podman network rm rdio_network || true
+fi
 
 echo "Rdio Scanner Monitor stopped"
 EOF
@@ -348,16 +466,34 @@ systemctl status rdio-monitor.service --no-pager -l || echo "Service not running
 echo
 
 echo "Container Status:"
-cd /etc/rdio-monitor
-podman-compose ps
+podman ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" || echo "No containers running"
+echo
+
+echo "Network Status:"
+podman network ls | grep rdio_network || echo "Network not found"
 echo
 
 echo "Disk Usage:"
-df -h /opt/rdio-monitor /var/lib/rdio-monitor /var/log/rdio-monitor
+df -h /opt/rdio-monitor /var/lib/rdio-monitor /var/log/rdio-monitor 2>/dev/null || echo "Directories not found"
 echo
 
 echo "Recent Logs (last 20 lines):"
 tail -20 /var/log/rdio-monitor/scanner.log 2>/dev/null || echo "No logs found"
+echo
+
+echo "Container Health:"
+for container in rdio-postgresql rdio-redis rdio-grafana rdio-scanner-app; do
+    if podman ps --filter "name=$container" --format "{{.Names}}" | grep -q "$container"; then
+        echo "✓ $container: Running"
+        # Try to get health status
+        health=$(podman inspect "$container" --format "{{.State.Health.Status}}" 2>/dev/null || echo "unknown")
+        if [[ "$health" != "unknown" ]]; then
+            echo "  Health: $health"
+        fi
+    else
+        echo "✗ $container: Not running"
+    fi
+done
 EOF
 
     # Make scripts executable
