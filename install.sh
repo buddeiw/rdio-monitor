@@ -375,14 +375,14 @@ podman network create rdio_network --subnet 172.20.0.0/24 2>/dev/null || {
 }
 
 # Start PostgreSQL
+# Start PostgreSQL with fixed permissions
 echo "Starting PostgreSQL..."
+sudo chown -R 999:999 /var/lib/rdio-monitor/postgresql 2>/dev/null || true
 podman run -d \
     --name rdio-postgresql \
     --network rdio_network \
     -p 5432:5432 \
-    -v /var/lib/rdio-monitor/postgresql:/var/lib/postgresql/data:Z \
-    -v /var/lib/rdio-monitor/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:Z,ro \
-    -v /var/lib/rdio-monitor/init-scanner-user.sql:/docker-entrypoint-initdb.d/02-scanner-user.sql:Z,ro \
+    -v /var/lib/rdio-monitor/postgresql:/var/lib/postgresql/data \
     -e POSTGRES_PASSWORD=postgres_admin_password \
     -e POSTGRES_DB=rdio_scanner \
     -e POSTGRES_USER=postgres \
