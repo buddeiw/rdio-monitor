@@ -111,6 +111,13 @@ create_directories() {
         mkdir -p "$dir"
         log_message "INFO" "Created directory: $dir"
     done
+
+    # In the create_directories() function, add:
+# Create container user directories with proper ownership
+mkdir -p /var/lib/rdio-monitor/audio /var/log/rdio-monitor
+chown -R 1000:1000 /var/lib/rdio-monitor/audio
+chown -R 1000:1000 /var/log/rdio-monitor
+chmod -R 755 /var/lib/rdio-monitor/audio /var/log/rdio-monitor
     
     # Set base permissions
     chmod 755 "$INSTALL_DIR" "$CONFIG_DIR"
@@ -341,6 +348,11 @@ EOF
     cat > "$INSTALL_DIR/entrypoint.sh" << 'EOF'
 #!/bin/bash
 set -e
+
+# Add this in the start.sh generation, before "podman run -d --name rdio-scanner-app":
+echo "Setting up container permissions..."
+chown -R 1000:1000 /var/lib/rdio-monitor/audio /var/log/rdio-monitor 2>/dev/null || true
+chmod -R 755 /var/lib/rdio-monitor/audio /var/log/rdio-monitor 2>/dev/null || true
 
 echo "Starting Rdio Scanner Monitor..."
 echo "Config file: ${CONFIG_FILE:-/app/config/config.ini}"
