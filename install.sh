@@ -141,6 +141,11 @@ install_packages() {
     # Enable EPEL and PowerTools repositories
     dnf install -y epel-release
     dnf config-manager --set-enabled crb
+
+    # Install ffmpeg
+    dnf install -y --nogpgcheck \
+        https://download1.rpmfusion.org/free/el/rpmfusion-free-release-$(rpm -E %rhel).noarch.rpm \
+        https://download1.rpmfusion.org/nonfree/el/rpmfusion-nonfree-release-$(rpm -E %rhel).noarch.rpm
     
     # Install Podman and container tools
     dnf install -y podman podman-compose podman-docker
@@ -168,11 +173,6 @@ install_packages() {
         gcc-c++ \
         make
     
-    # Install audio processing libraries
-    dnf install -y \
-        ffmpeg \
-        ffmpeg-devel \
-        alsa-lib-devel
     
     # Install PostgreSQL client
     dnf install -y postgresql postgresql-contrib
