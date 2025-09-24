@@ -1,0 +1,482 @@
+# Docker Compose configuration for Rdio Scanner Monitor
+# This file defines all the containers needed for the monitoring system
+version: '3.8'
+
+# Define named volumes for persistent data storage
+volumes:
+  # PostgreSQL data volume for database persistence
+  postgresql_data:
+    driver: local
+    driver_opts:
+      type: bind
+      o: bind
+      device: /var/lib/rdio-monitor/postgresql
+  
+  # Grafana data volume for dashboard and configuration persistence  
+  grafana_data:
+    driver: local
+    driver_opts:
+      type: bind
+      o: bind
+      device: /var/lib/rdio-monitor/grafana
+  
+  # Audio storage volume for recorded call audio files
+  audio_storage:
+    driver: local
+    driver_opts:
+      type: bind
+      o: bind
+      device: /var/lib/rdio-monitor/audio
+
+# Define custom network for container communication
+networks:
+  rdio_network:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        # Define subnet for internal container communication
+        - subnet: 172.20.0.0/24
+
+# Service definitions
+services:
+  # PostgreSQL database service for storing call data and metadata
+  rdio-postgresql:
+    image: postgres:15-alpine
+    container_name: rdio-postgresql
+    restart: unless-stopped
+    
+    # Environment variables for database initialization
+    environment:
+      # PostgreSQL superuser password (change this in production!)
+      POSTGRES_PASSWORD: postgres_admin_password
+      # Database name to create on initialization
+      POSTGRES_DB: rdio_scanner
+      # Default PostgreSQL user
+      POSTGRES_USER: postgres
+      # Additional database user for application
+      POSTGRES_SCANNER_USER: scanner
+      POSTGRES_SCANNER_PASSWORD: scanner_password
+      # Performance tuning environment variables
+      POSTGRES_SHARED_PRELOAD_LIBRARIES: 'pg_stat_statements'
+      POSTGRES_MAX_CONNECTIONS: '200'
+      POSTGRES_WORK_MEM: '16MB'
+      POSTGRES_MAINTENANCE_WORK_MEM: '128MB'
+    
+    # Volume mounts for data persistence and configuration
+    volumes:
+      - postgresql_data:/var/lib/postgresql/data
+      # Custom PostgreSQL configuration file
+      - /etc/rdio-monitor/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+      # Database initialization scripts
+      - /var/lib/rdio-monitor/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      # Backup directory mount
+      - /var/lib/rdio-monitor/backups:/backups
+    
+    # Port mapping (internal port 5432 to host port 5432)
+    ports:
+      - "5432:5432"
+    
+    # Network configuration
+    networks:
+      rdio_network:
+        ipv4_address: 172.20.0.10
+    
+    # Health check to ensure database is responding
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    
+    # Resource limits to prevent container from consuming all system resources
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '1.0'
+        reservations:
+          memory: 512M
+          cpus: '0.5'
+    
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "3"
+
+  # Grafana service for monitoring dashboards and visualization
+  rdio-grafana:
+    image: grafana/grafana:latest
+    container_name: rdio-grafana
+    restart: unless-stopped
+    
+    # Run as specific user to avoid permission issues
+    user: "472"
+    
+    # Environment variables for Grafana configuration
+    environment:
+      # Admin user credentials (change these in production!)
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      # Server configuration
+      GF_SERVER_HTTP_PORT: 3000
+      GF_SERVER_PROTOCOL: http
+      GF_SERVER_DOMAIN: localhost
+      GF_SERVER_ROOT_URL: http://localhost:3000
+      # Database configuration (use PostgreSQL for Grafana metadata)
+      GF_DATABASE_TYPE: postgres
+      GF_DATABASE_HOST: rdio-postgresql:5432
+      GF_DATABASE_NAME: rdio_scanner
+      GF_DATABASE_USER: scanner
+      GF_DATABASE_PASSWORD: scanner_password
+      GF_DATABASE_SSL_MODE: disable
+      # Security settings
+      GF_SECURITY_SECRET_KEY: your_secret_key_here_change_this
+      GF_SECURITY_COOKIE_SECURE: false
+      GF_SECURITY_COOKIE_SAMESITE: lax
+      # User management
+      GF_USERS_ALLOW_SIGN_UP: false
+      GF_USERS_ALLOW_ORG_CREATE: false
+      GF_USERS_AUTO_ASSIGN_ORG: true
+      GF_USERS_AUTO_ASSIGN_ORG_ROLE: Viewer
+      # Anonymous access configuration
+      GF_AUTH_ANONYMOUS_ENABLED: false
+      # Session configuration
+      GF_SESSION_PROVIDER: memory
+      GF_SESSION_COOKIE_NAME: grafana_sess
+      GF_SESSION_COOKIE_SECURE: false
+      GF_SESSION_SESSION_LIFE_TIME: 86400
+      # Logging configuration
+      GF_LOG_MODE: console file
+      GF_LOG_LEVEL: info
+      # Feature toggles
+      GF_FEATURE_TOGGLES_ENABLE: publicDashboards
+      # Plugin configuration
+      GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS: true
+      # SMTP configuration for email alerts
+      GF_SMTP_ENABLED: false
+      GF_SMTP_HOST: smtp.gmail.com:587
+      GF_SMTP_USER: your-email@gmail.com
+      GF_SMTP_PASSWORD: your-app-password
+      GF_SMTP_FROM_ADDRESS: rdio-monitor@your-domain.com
+      GF_SMTP_FROM_NAME: Rdio Monitor
+    
+    # Volume mounts for data persistence and configuration
+    volumes:
+      - grafana_data:/var/lib/grafana
+      # Custom Grafana configuration file
+      - /etc/rdio-monitor/grafana.ini:/etc/grafana/grafana.ini:ro
+      # Dashboard provisioning directory
+      - /opt/rdio-monitor/dashboards:/etc/grafana/provisioning/dashboards:ro
+      # Datasource provisioning directory  
+      - /opt/rdio-monitor/datasources:/etc/grafana/provisioning/datasources:ro
+      # Log directory
+      - /var/log/rdio-monitor:/var/log/grafana
+    
+    # Port mapping (internal port 3000 to host port 3000)
+    ports:
+      - "3000:3000"
+    
+    # Network configuration
+    networks:
+      rdio_network:
+        ipv4_address: 172.20.0.20
+    
+    # Service dependencies
+    depends_on:
+      rdio-postgresql:
+        condition: service_healthy
+    
+    # Health check to ensure Grafana is responding
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:3000/api/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+        reservations:
+          memory: 256M
+          cpus: '0.25'
+    
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+  # Redis service for caching and session storage (optional but recommended)
+  rdio-redis:
+    image: redis:7-alpine
+    container_name: rdio-redis
+    restart: unless-stopped
+    
+    # Redis configuration
+    command: >
+      redis-server
+      --appendonly yes
+      --appendfsync everysec
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+      --save 60 1000
+      --tcp-keepalive 60
+      --timeout 300
+    
+    # Volume for Redis data persistence
+    volumes:
+      - /var/lib/rdio-monitor/redis:/data
+    
+    # Port mapping (internal port 6379 to host port 6379)
+    ports:
+      - "6379:6379"
+    
+    # Network configuration
+    networks:
+      rdio_network:
+        ipv4_address: 172.20.0.30
+    
+    # Health check for Redis
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.25'
+        reservations:
+          memory: 128M
+          cpus: '0.1'
+    
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+  # Nginx reverse proxy for load balancing and SSL termination (optional)
+  rdio-nginx:
+    image: nginx:alpine
+    container_name: rdio-nginx
+    restart: unless-stopped
+    
+    # Volume mounts for configuration and SSL certificates
+    volumes:
+      # Nginx configuration file
+      - /etc/rdio-monitor/nginx.conf:/etc/nginx/nginx.conf:ro
+      # SSL certificates directory (if using HTTPS)
+      - /etc/rdio-monitor/ssl:/etc/nginx/ssl:ro
+      # Static files directory
+      - /opt/rdio-monitor/static:/var/www/html:ro
+      # Log directory
+      - /var/log/rdio-monitor/nginx:/var/log/nginx
+    
+    # Port mappings for HTTP and HTTPS
+    ports:
+      - "80:80"
+      - "443:443"
+    
+    # Network configuration
+    networks:
+      rdio_network:
+        ipv4_address: 172.20.0.40
+    
+    # Service dependencies
+    depends_on:
+      - rdio-grafana
+    
+    # Health check for Nginx
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: '0.25'
+        reservations:
+          memory: 64M
+          cpus: '0.1'
+    
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+  # Scanner application service (custom Python application)
+  rdio-scanner-app:
+    build:
+      context: /opt/rdio-monitor
+      dockerfile: Dockerfile
+    image: rdio-scanner:latest
+    container_name: rdio-scanner-app
+    restart: unless-stopped
+    
+    # Environment variables for the scanner application
+    environment:
+      # Configuration file path
+      CONFIG_FILE: /etc/rdio-monitor/config.ini
+      # Python environment
+      PYTHONPATH: /app
+      PYTHONUNBUFFERED: 1
+      # Database connection string
+      DATABASE_URL: postgresql://scanner:scanner_password@rdio-postgresql:5432/rdio_scanner
+      # Redis connection string
+      REDIS_URL: redis://rdio-redis:6379/0
+      # Log level
+      LOG_LEVEL: INFO
+    
+    # Volume mounts for configuration, data, and logs
+    volumes:
+      # Configuration file
+      - /etc/rdio-monitor/config.ini:/etc/rdio-monitor/config.ini:ro
+      # Audio storage directory
+      - audio_storage:/app/audio
+      # Log directory
+      - /var/log/rdio-monitor:/app/logs
+      # Temporary directory for processing
+      - /tmp/rdio-monitor:/app/temp
+    
+    # Network configuration
+    networks:
+      rdio_network:
+        ipv4_address: 172.20.0.50
+    
+    # Service dependencies
+    depends_on:
+      rdio-postgresql:
+        condition: service_healthy
+      rdio-redis:
+        condition: service_healthy
+    
+    # Health check for the scanner application
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import requests; requests.get('http://localhost:8080/health')"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+    
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '1.0'
+        reservations:
+          memory: 512M
+          cpus: '0.5'
+    
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "5"
+
+# Additional service for log aggregation (optional)
+  rdio-logstash:
+    image: docker.elastic.co/logstash/logstash:8.8.0
+    container_name: rdio-logstash
+    restart: unless-stopped
+    
+    # Environment variables
+    environment:
+      LS_JAVA_OPTS: "-Xmx256m -Xms256m"
+      PIPELINE_WORKERS: 2
+      PIPELINE_BATCH_SIZE: 125
+    
+    # Volume mounts for configuration and logs
+    volumes:
+      # Logstash configuration
+      - /etc/rdio-monitor/logstash.conf:/usr/share/logstash/pipeline/logstash.conf:ro
+      # Log files to process
+      - /var/log/rdio-monitor:/logs:ro
+    
+    # Network configuration
+    networks:
+      rdio_network:
+        ipv4_address: 172.20.0.60
+    
+    # Service dependencies
+    depends_on:
+      - rdio-postgresql
+    
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+        reservations:
+          memory: 256M
+          cpus: '0.25'
+    
+    # Logging configuration
+    logging:
+      driver: "json-file" 
+      options:
+        max-size: "50m"
+        max-file: "2"
+
+# Health check service to monitor all components
+  rdio-healthcheck:
+    image: alpine:latest
+    container_name: rdio-healthcheck
+    restart: unless-stopped
+    
+    # Install curl for health checks
+    command: >
+      sh -c "apk add --no-cache curl &&
+             while true; do
+               echo 'Running health checks...' &&
+               curl -f http://rdio-grafana:3000/api/health &&
+               curl -f http://rdio-scanner-app:8080/health &&
+               echo 'Health checks completed' &&
+               sleep 300;
+             done"
+    
+    # Network configuration
+    networks:
+      rdio_network:
+        ipv4_address: 172.20.0.99
+    
+    # Service dependencies
+    depends_on:
+      - rdio-grafana
+      - rdio-scanner-app
+    
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+          cpus: '0.1'
+    
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "1"

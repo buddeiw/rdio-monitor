@@ -1,0 +1,90 @@
+# Systemd service file for Rdio Scanner Monitor
+# This service manages the Python monitoring application as a system daemon
+# Location: /etc/systemd/system/rdio-monitor.service
+
+[Unit]
+Description=Rdio Scanner Monitor Service
+Documentation=man:rdio_scanner.py(1)
+After=network.target network-online.target postgresql.service
+Wants=network-online.target
+Requires=postgresql.service
+
+# Ensure the service starts after containers are running
+After=podman.service
+Wants=podman.service
+
+[Service]
+# Service type and execution configuration
+Type=simple
+ExecStart=/usr/bin/python3 /opt/rdio-monitor/rdio_scanner.py /etc/rdio-monitor/config.ini
+ExecReload=/bin/kill -HUP $MAINPID
+ExecStop=/bin/kill -TERM $MAINPID
+
+# Process management
+Restart=always
+RestartSec=10
+StartLimitInterval=300
+StartLimitBurst=5
+TimeoutStartSec=60
+TimeoutStopSec=30
+KillMode=mixed
+KillSignal=SIGTERM
+
+# User and group configuration
+User=podman
+Group=podman
+WorkingDirectory=/opt/rdio-monitor
+
+# Environment variables
+Environment="CONFIG_FILE=/etc/rdio-monitor/config.ini"
+Environment="PYTHONPATH=/opt/rdio-monitor"
+Environment="PYTHONUNBUFFERED=1"
+Environment="LOG_LEVEL=INFO"
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/rdio-monitor /var/log/rdio-monitor /tmp/rdio-monitor
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RemoveIPC=true
+RestrictNamespaces=true
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=4096
+MemoryMax=2G
+TasksMax=1000
+
+# Capabilities (minimal required permissions)
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+# Network restrictions (allow only necessary network access)
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+# File system restrictions
+ProtectKernelLogs=true
+ProtectClock=true
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# Standard I/O configuration
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rdio-monitor
+
+# Logging configuration for systemd journal
+StandardOutputFileDescriptor=
+StandardErrorFileDescriptor=
+
+[Install]
+WantedBy=multi-user.target
+
+# Additional systemd configuration for monitoring and alerting
+# These can be used with systemd-notify for service status reporting
