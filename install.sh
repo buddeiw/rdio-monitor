@@ -394,7 +394,8 @@ else
         -v /var/lib/rdio-monitor/audio:/app/audio \
         -v /var/log/rdio-monitor:/app/logs \
         -e CONFIG_FILE=/app/config/config.ini \
-        -e DATABASE_HOST=172.20.0.10 \
+        -e DATABASE_HOST=rdio-postgresql \
+        -e DATABASE_PORT=5432 \
         -e REDIS_HOST=172.20.0.30 \
         --restart unless-stopped \
         rdio-scanner:latest
