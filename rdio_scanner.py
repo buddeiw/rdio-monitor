@@ -44,6 +44,8 @@ from psycopg2.pool import ThreadedConnectionPool
 import schedule
 from pydub import AudioSegment
 from pydub.utils import which
+from flask import Flask, jsonify
+import gunicorn
 
 # Configure logging format and level
 logging.basicConfig(
@@ -118,13 +120,13 @@ class DatabaseManager:
         self.connection_pool = None
         self.lock = threading.Lock()
         
-        # Database connection parameters
+        # Database connection parameters - handle environment variables
         self.db_params = {
-            'host': config.get('database', 'host'),
-            'port': config.getint('database', 'port'),
-            'database': config.get('database', 'database'),
-            'user': config.get('database', 'username'),
-            'password': config.get('database', 'password'),
+            'host': os.getenv('DATABASE_HOST', config.get('database', 'host')),
+            'port': int(os.getenv('DATABASE_PORT', config.getint('database', 'port'))),
+            'database': os.getenv('DATABASE_NAME', config.get('database', 'database')),
+            'user': os.getenv('DATABASE_USER', config.get('database', 'username')),
+            'password': os.getenv('DATABASE_PASSWORD', config.get('database', 'password')),
             'connect_timeout': config.getint('database', 'connect_timeout'),
         }
         
@@ -1297,6 +1299,9 @@ class RdioScannerMonitor:
         self.scanner_client = RdioScannerClient(self.config)
         self.system_monitor = SystemMonitor(self.config)
         
+        # Flask app for health endpoint
+        self.app = None
+        
         # Setup signal handlers for graceful shutdown
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
@@ -1384,6 +1389,62 @@ class RdioScannerMonitor:
             root_logger.addHandler(console_handler)
         
         logger.info("Logging configuration applied")
+    
+    def start_health_server(self):
+        """Start HTTP health check server."""
+        try:
+            self.app = Flask(__name__)
+            
+            # Disable Flask's default logging to avoid conflicts
+            import logging as flask_logging
+            flask_logging.getLogger('werkzeug').setLevel(flask_logging.ERROR)
+            
+            @self.app.route('/health')
+            def health():
+                """Health check endpoint."""
+                try:
+                    stats = self.system_monitor.get_system_stats()
+                    
+                    # Test basic connectivity
+                    db_healthy = True
+                    try:
+                        conn = self.db_manager.get_connection()
+                        with conn.cursor() as cursor:
+                            cursor.execute("SELECT 1")
+                        self.db_manager.return_connection(conn)
+                    except Exception:
+                        db_healthy = False
+                    
+                    response = {
+                        'status': 'healthy' if db_healthy else 'unhealthy',
+                        'timestamp': datetime.now(timezone.utc).isoformat(),
+                        'uptime_seconds': stats.get('uptime_seconds', 0),
+                        'calls_processed': stats.get('calls_processed', 0),
+                        'database_healthy': db_healthy,
+                        'version': '1.0.0'
+                    }
+                    
+                    return jsonify(response), 200 if db_healthy else 503
+                    
+                except Exception as e:
+                    return jsonify({
+                        'status': 'error',
+                        'error': str(e),
+                        'timestamp': datetime.now(timezone.utc).isoformat()
+                    }), 500
+            
+            # Start Flask in a separate thread
+            def run_flask():
+                self.app.run(host='0.0.0.0', port=8080, debug=False, use_reloader=False)
+            
+            flask_thread = threading.Thread(target=run_flask)
+            flask_thread.daemon = True
+            flask_thread.start()
+            
+            logger.info("Health check server started on port 8080")
+            
+        except Exception as e:
+            logger.error(f"Failed to start health server: {e}")
     
     def poll_and_process_calls(self):
         """Poll for new calls and process them."""
@@ -1504,6 +1565,9 @@ class RdioScannerMonitor:
         # Setup logging
         self._setup_logging()
         
+        # Start health check server
+        self.start_health_server()
+        
         # Test initial connections
         if not self.scanner_client.test_connection():
             logger.error("Failed to connect to Rdio Scanner API. Exiting.")
@@ -1558,7 +1622,7 @@ class RdioScannerMonitor:
 def main():
     """Main entry point for the application."""
     # Default configuration file path
-    config_file = os.environ.get('CONFIG_FILE', '/etc/rdio-monitor/config.ini')
+    config_file = os.environ.get('CONFIG_FILE', '/app/config/config.ini')
     
     # Parse command line arguments if needed
     if len(sys.argv) > 1:
